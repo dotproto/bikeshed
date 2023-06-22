@@ -58,7 +58,6 @@ from .dom import (
     removeAttr,
     removeClass,
     removeNode,
-    replaceAwkwardCSSShorthands,
     replaceContents,
     replaceMacros,
     replaceNode,
@@ -112,3 +111,7 @@ from .parser import (
     test,
 )
 from .serializer import Serializer
+from .parser import (
+    initialDocumentParse,
+    strFromNodes,
+)

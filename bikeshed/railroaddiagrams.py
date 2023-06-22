@@ -234,7 +234,7 @@ class Path:
         write("<path")
         for name, value in sorted(self.attrs.items()):
             write(f' {name}="{escapeAttr(value)}"')
-        write(" />")
+        write("></path>")
 
     def format(self) -> Path:
         self.attrs["d"] += "h.5"

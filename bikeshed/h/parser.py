@@ -13,7 +13,6 @@ from abc import ABCMeta
 
 
 from .. import messages as m, t
-from . import dom
 
 
 def test() -> None:
@@ -24,14 +23,22 @@ def test() -> None:
         list(nodesFromHtml(vals))
 
 
-def nodesFromHtml(data: str, startLine: int = 1) -> t.Generator[ParserNode, None, None]:
+def nodesFromHtml(data: str, startLine: int = 1, doc: t.SpecT | None = None) -> t.Generator[ParserNode, None, None]:
+
+    if doc:
+        usesMarkdown = "markdown" in doc.md.markupShorthands
+        usesCSS = "css" in doc.md.markupShorthands
+    else:
+        usesMarkdown = True
+        usesCSS = True
+
     i = 0
     s = Stream(data, startLine=startLine)
     _, i = parseDoctype(s, i)
     text = ""
     textI = 0
     while not s.eof(i):
-        node, i = parseNode(s, i)
+        node, i = parseNode(s, i, usesMarkdown=usesMarkdown, usesCSS=usesCSS)
         if node is Failure:
             text += s[i]
             i += 1
@@ -49,7 +56,7 @@ def nodesFromHtml(data: str, startLine: int = 1) -> t.Generator[ParserNode, None
         yield Text(startLine, endLine, text)
 
 
-def parseNode(s: Stream, start: int) -> Result:
+def parseNode(s: Stream, start: int, usesMarkdown: bool = True, usesCSS: bool = True) -> Result:
     # Produces a non-Text ParserNode (not a string)
     if s.eof(start):
         return Result.fail(start)
@@ -65,6 +72,16 @@ def parseNode(s: Stream, start: int) -> Result:
                 el, endI = parseMetadataBlock(s, start)
                 if el is not Failure:
                     return Result(el, endI)
+                if isDatablockPre(startTag):
+                    text, i = parseRawPreToEnd(s, i)
+                    el = RawElement(
+                        line=startTag.line,
+                        tag="pre",
+                        startTag=startTag,
+                        data=text,
+                        endLine=s.line(i - 1),
+                    )
+                    return Result(el, i)
             if startTag.tag == "script":
                 text, i = parseScriptToEnd(s, i)
                 el = RawElement(
@@ -102,9 +119,10 @@ def parseNode(s: Stream, start: int) -> Result:
         if endTag is not Failure:
             return Result(endTag, i)
 
-        el, i = parseCSSProduction(s, start)
-        if el is not Failure:
-            return Result(el, i)
+        if usesCSS:
+            el, i = parseCSSProduction(s, start)
+            if el is not Failure:
+                return Result(el, i)
     # This isn't quite correct to handle here,
     # but it'll have to wait until I munge
     # the markdown and HTML parsers together.
@@ -112,22 +130,50 @@ def parseNode(s: Stream, start: int) -> Result:
         el, i = parseFencedCodeBlock(s, start)
         if el is not Failure:
             return Result(el, i)
-    if s[start] == "`":
-        el, i = parseCodeSpan(s, start)
-        if el is not Failure:
-            return Result(el, i)
-    if s[start : start + 2] == "\\`":
-        node = Text(
-            line=s.line(start),
-            endLine=s.line(start),
-            text="`",
-        )
-        return Result(node, start + 2)
+    if usesMarkdown:
+        if s[start] == "`":
+            el, i = parseCodeSpan(s, start)
+            if el is not Failure:
+                return Result(el, i)
+        if s[start : start + 2] == "\\`":
+            node = Text(
+                line=s.line(start),
+                endLine=s.line(start),
+                text="`",
+            )
+            return Result(node, start + 2)
+    if usesCSS:
+        if s[start] == "'":
+            el, i = parseCSSMaybe(s, start)
+            if el is not Failure:
+                return Result(el, i)
 
     return Result.fail(start)
 
 
-def initialDocumentParse(text: str, startLine: int = 1) -> list[ParserNode]:
+def isDatablockPre(tag: StartTag) -> bool:
+    datablockClasses = [
+        "simpledef",
+        "propdef",
+        "descdef",
+        "elementdef",
+        "argumentdef",
+        "railroad",
+        "biblio",
+        "anchors",
+        "link-defaults",
+        "ignored-specs",
+        "info",
+        "include",
+        "include-code",
+        "include-raw",
+    ]
+    tag.finalize()
+    return any(x in tag.classes for x in datablockClasses)
+
+
+
+def initialDocumentParse(text: str, startLine: int = 1, doc: t.SpecT | None = None) -> list[ParserNode]:
     # Just do a document parse.
     # This will add `bs-line-number` attributes,
     # normalize any difficult shorthands
@@ -135,15 +181,16 @@ def initialDocumentParse(text: str, startLine: int = 1) -> list[ParserNode]:
     # and blank out comments.
 
     nodes: list[ParserNode] = []
-    for node in nodesFromHtml(text, startLine=startLine):
+    for node in nodesFromHtml(text, startLine=startLine, doc=doc):
         if isinstance(node, Comment):
             lines = node.data.split("\n")
             if len(lines) < 2:
                 # doesn't span lines, I can just drop it
                 continue
-            # Otherwise, replace it with the same number
-            # of blank lines
-            nodes.append(Text(node.line, node.line + len(lines) - 1, "\n".join("" for x in lines)))
+            else:
+                # Otherwise, replace it with the same number
+                # of blank lines
+                nodes.append(Text(node.line, node.line + len(lines) - 1, "\n".join("" for x in lines)))
         else:
             nodes.append(node)
     return nodes
@@ -382,7 +429,7 @@ class StartTag(ParserNode):
         for k, v in sorted(self.attrs.items()):
             if k == "bs-line-number":
                 continue
-            attrs += f' {k}="{dom.escapeAttr(v)}"'
+            attrs += f' {k}="{escapeAttr(v)}"'
         if self.classes:
             attrs += f' class="{" ".join(sorted(self.classes))}"'
         return start + attrs + ">"
@@ -433,7 +480,7 @@ class WholeElement(ParserNode):
     text: str
 
     def __str__(self) -> str:
-        return f"{self.startTag}{dom.escapeHTML(self.text)}</{self.tag}>"
+        return f"{self.startTag}{escapeHTML(self.text)}</{self.tag}>"
 
 
 #
@@ -817,6 +864,22 @@ def parseXmpToEnd(s: Stream, start: int) -> Result:
     assert False
 
 
+def parseRawPreToEnd(s: Stream, start: int) -> Result:
+    # Identical to parseScriptToEnd
+
+    i = start
+    while True:
+        while s[i] != "<" and not s.eof(i):
+            i += 1
+        if s.eof(i):
+            m.die("Hit EOF in the middle of a <pre> datablock.", lineNum=s.loc(start))
+            return Result.fail(start)
+        if s[i : i + 6] == "</pre>":
+            return Result(s[start:i], i + 6)
+        i += 1
+    assert False
+
+
 def parseCSSProduction(s: Stream, start: int) -> Result:
     if s[start : start + 2] != "<<":
         return Result.fail(start)
@@ -834,6 +897,37 @@ def parseCSSProduction(s: Stream, start: int) -> Result:
         endLine=s.line(start),
         tag="fake-production-placeholder",
         attrs={"bs-autolink-syntax": s[start:i], "class": "production", "bs-opaque": ""},
+    ).finalize()
+    el = WholeElement(
+        line=startTag.line,
+        tag=startTag.tag,
+        startTag=startTag,
+        text=text,
+        endLine=s.line(i - 1),
+    )
+    return Result(el, i)
+
+def parseCSSMaybe(s: Stream, start:int) -> Result:
+    # Maybes can cause parser issues,
+    # like ''<length>/px'',
+    # but also can contain other markup that would split the text,
+    # which used to be a problem.
+    if s[start : start + 2] != "''":
+        return Result.fail(start)
+    i = start + 2
+
+    text, i = s.skipTo(i, "''")
+    if text is Failure:
+        return Result.fail(start)
+    if "\n" in text:
+        return Result.fail(start)
+    i += 2
+
+    startTag = StartTag(
+        line=s.line(start),
+        endLine=s.line(start),
+        tag="fake-maybe-placeholder",
+        attrs={"bs-autolink-syntax": s[start:i]},
     ).finalize()
     el = WholeElement(
         line=startTag.line,
@@ -917,7 +1011,7 @@ def parseFencedCodeBlock(s: Stream, start: int) -> Result:
         # This isn't allowed, because it collides with inline code spans.
         return Result.fail(start)
 
-    contents = ""
+    contents = "\n"
     while True:
         # Ending fence has to use same character and be
         # at least as long, so just search for the opening
@@ -1032,6 +1126,16 @@ def parseMetadataBlock(s: Stream, start: int) -> Result:
         endLine=s.line(i - 1),
     )
     return Result(el, i)
+
+
+
+def escapeHTML(text: str) -> str:
+    # Escape HTML
+    return text.replace("&", "&amp;").replace("<", "&lt;")
+
+
+def escapeAttr(text: str) -> str:
+    return text.replace("&", "&amp;").replace('"', "&quot;")
 
 
 #

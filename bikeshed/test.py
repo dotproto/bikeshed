@@ -98,11 +98,14 @@ def processTest(
     md: metadata.MetadataManager | None = None,
     fileRequester: t.DataFileRequester = retrieve.DataFileRequester(fileType="readonly"),
 ) -> t.SpecT:
-    doc = Spec(inputFilename=path, fileRequester=fileRequester, testing=True)
-    if md is not None:
-        doc.mdCommandLine = md
-    addTestMetadata(doc)
-    doc.preprocess()
+    try:
+        doc = Spec(inputFilename=path, fileRequester=fileRequester, testing=True)
+        if md is not None:
+            doc.mdCommandLine = md
+        addTestMetadata(doc)
+        doc.preprocess()
+    except Exception as e:
+        m.p(f"Error running test {path}:\n  {e}")
     return doc
 
 
